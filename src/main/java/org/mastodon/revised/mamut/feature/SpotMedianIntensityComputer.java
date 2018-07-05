@@ -21,6 +21,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JSeparator;
 
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.mastodon.graph.io.RawGraphIO.FileIdToGraphMap;
 import org.mastodon.io.FileIdToObjectMap;
 import org.mastodon.io.properties.DoublePropertyMapSerializer;
@@ -28,7 +29,6 @@ import org.mastodon.pool.PoolCollectionWrapper;
 import org.mastodon.properties.DoublePropertyMap;
 import org.mastodon.revised.bdv.SharedBigDataViewerData;
 import org.mastodon.revised.bdv.overlay.util.JamaEigenvalueDecomposition;
-import org.mastodon.revised.mamut.feature.SpotFeatureComputer;
 import org.mastodon.revised.model.feature.DoubleArrayFeature;
 import org.mastodon.revised.model.feature.FeatureUtil;
 import org.mastodon.revised.model.feature.FeatureUtil.Dimension;
@@ -57,11 +57,10 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 	private static final double SIGMA_FACTOR = 2.;
 
 	private static final String HELP_STRING =
-			"Computes the average intensity and its standard deviation inside spots "
+			"Computes the median intensity inside spots "
 					+ "over all sources of the dataset. "
-					+ "The average is calculated by a weighted mean over the pixels of the spot, "
-					+ "weighted by a gaussian centered in the spot and with a sigma value equal "
-					+ "to the minimal radius of the ellipsoid divided by " + SIGMA_FACTOR + ".";
+					+ "For now the median is calculated from the smallest "
+					+ " bounding box that fits within the spot.";
 
 	public SpotMedianIntensityComputer()
 	{
@@ -92,13 +91,15 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 		if ( null == bdvData )
 			return Collections.emptyList();
 
+		// ES; change name projection keys from Mean to Median, comment Std, as not used
+		// for median
 		final List< String > projectionKeys = new ArrayList<>( processSource.length * 2 );
 		for ( int iSource = 0; iSource < processSource.length; iSource++ )
 		{
-			final String nameMean = "Average ch " + iSource;
-			projectionKeys.add( nameMean );
-			final String nameStd = "Std ch " + iSource;
-			projectionKeys.add( nameStd );
+			final String nameMedian = "Median ch " + iSource;
+			projectionKeys.add(nameMedian);
+			// final String nameStd = "Std ch " + iSource;
+			// projectionKeys.add( nameStd );
 		}
 		return projectionKeys;
 	}
@@ -141,22 +142,30 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 		final SpatioTemporalIndex< Spot > index = model.getSpatioTemporalIndex();
 		final int numTimepoints = bdvData.getNumTimepoints();
 		final int nSources = sources.size();
+
+		// ES initiate the statistics array for the median calculation and clear for
+		// each loop
+		final DescriptiveStatistics intensities = new DescriptiveStatistics();
+
 		for ( int iSource = 0; iSource < nSources; iSource++ )
 		{
 			if ( !processSource[ iSource ] )
 				continue;
-
+			// ES Change Mean to Median and comment standard dev, will not be used for
+			// median..
 			final PoolCollectionWrapper< Spot > vertices = model.getGraph().vertices();
-			final DoublePropertyMap< Spot > pmMean = new DoublePropertyMap<>( vertices, Double.NaN );
-			pms.add( pmMean );
-			final String nameMean = "Average ch " + iSource;
-			names.add( nameMean );
+			final DoublePropertyMap<Spot> pmMedian = new DoublePropertyMap<>(vertices, Double.NaN);
+			pms.add(pmMedian);
+			final String nameMedian = "Median ch " + iSource;
+			names.add(nameMedian);
 			units.add( FeatureUtil.dimensionToUnits( Dimension.INTENSITY, spaceUnits, timeUnits ) );
-			final DoublePropertyMap< Spot > pmStd = new DoublePropertyMap<>( vertices, Double.NaN );
-			pms.add( pmStd );
-			final String nameStd = "Std ch " + iSource;
-			names.add( nameStd );
-			units.add( FeatureUtil.dimensionToUnits( Dimension.INTENSITY, spaceUnits, timeUnits ) );
+			// final DoublePropertyMap< Spot > pmStd = new DoublePropertyMap<>( vertices,
+			// Double.NaN );
+			// pms.add( pmStd );
+			// final String nameStd = "Std ch " + iSource;
+			// names.add( nameStd );
+			// units.add( FeatureUtil.dimensionToUnits( Dimension.INTENSITY, spaceUnits,
+			// timeUnits ) );
 
 			final Source< ? > source = sources.get( iSource ).getSpimSource();
 			for ( int timepoint = 0; timepoint < numTimepoints; timepoint++ )
@@ -205,10 +214,11 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 					
 					
 					/*
-					 * ES 04-07-2018
-					 * Determine median in the spot (for now Bounding Box around the spot) 
+					 * ES 04-07-2018 Determine median in the spot (for now Bounding Box around the
+					 * spot) First, make sure no data is left in the array where intensities are
+					 * stored
 					 */
-					final List<Double> intensities = new ArrayList<> () ;
+					intensities.clear();
 					
 					
 					for ( long z = minZ; z <= maxZ; z++ )
@@ -235,19 +245,20 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 								S = S + weight * ( val - oldWeightedMean ) * ( val - weightedMean );
 								
 								// ES: Add intensity value to the intensity list
-								intensities.add(val);
+								intensities.addValue(val);
 								  
 								 
 							}
 						}
 					}
+					// ES get the median (or the percentile of 50):
+					final double median = intensities.getPercentile(50);
 
-					final double variance = S / weightedSum;
-					pmMean.set( spot, weightedMean );
-					pmStd.set( spot, Math.sqrt( variance ) );
+					// final double variance = S / weightedSum;
+					pmMedian.set(spot, median);
+					// pmStd.set( spot, Math.sqrt( variance ) );
 					
-					//ES sort intensity list in ascending (hopefully natural) order and get the median:
-					Collections.sort(intensities);
+
 				}
 			}
 		}
