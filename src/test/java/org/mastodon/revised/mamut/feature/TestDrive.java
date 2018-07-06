@@ -14,19 +14,21 @@ import org.scijava.Context;
 
 import mpicbg.spim.data.SpimDataException;
 
-public class TestDrive {
+public class TestDrive
+{
 
-	public static void main(final String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException, UnsupportedLookAndFeelException, IOException, SpimDataException {
+	public static void main( final String[] args ) throws ClassNotFoundException, InstantiationException, IllegalAccessException, UnsupportedLookAndFeelException, IOException, SpimDataException
+	{
 		Locale.setDefault( Locale.ROOT );
 		UIManager.setLookAndFeel( UIManager.getSystemLookAndFeelClassName() );
 
 		final MamutProject project = new MamutProjectIO().load( "../TrackMate3/samples/mamutproject" );
 
 		final Context context = new Context();
-		final WindowManager windowManager = new WindowManager(context );
+		final WindowManager windowManager = new WindowManager( context );
 		windowManager.getProjectManager().open( project );
-		
-		final MainWindow mainWindow = new MainWindow(windowManager);
-		mainWindow.setVisible(true);
+
+		final MainWindow mainWindow = new MainWindow( windowManager );
+		mainWindow.setVisible( true );
 	}
 }

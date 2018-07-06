@@ -17,32 +17,34 @@ import org.scijava.Context;
 
 import mpicbg.spim.data.SpimDataException;
 
-public class SpotMedianIntensityComputerExample {
+public class SpotMedianIntensityComputerExample
+{
 
-	public static void main(final String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException, UnsupportedLookAndFeelException, IOException, SpimDataException {
+	public static void main( final String[] args ) throws ClassNotFoundException, InstantiationException, IllegalAccessException, UnsupportedLookAndFeelException, IOException, SpimDataException
+	{
 		Locale.setDefault( Locale.ROOT );
 		UIManager.setLookAndFeel( UIManager.getSystemLookAndFeelClassName() );
 
 		final MamutProject project = new MamutProjectIO().load( "../TrackMate3/samples/mamutproject" );
 
 		final Context context = new Context();
-		final WindowManager windowManager = new WindowManager(context );
+		final WindowManager windowManager = new WindowManager( context );
 		windowManager.getProjectManager().open( project );
 		final Model model = windowManager.getAppModel().getModel();
-		
+
 		final SpotMedianIntensityComputer computer = new SpotMedianIntensityComputer();
-		computer.setSharedBigDataViewerData(windowManager.getAppModel().getSharedBdvData());
-		
-		System.out.println("\nComputing feature....");
-		final DoubleArrayFeature<Spot> feature = computer.compute(model);
-		System.out.println("Done.");
-		
-		final Iterator<Spot> iterator = model.getGraph().vertices().iterator();
-		while(iterator.hasNext())
+		computer.setSharedBigDataViewerData( windowManager.getAppModel().getSharedBdvData() );
+
+		System.out.println( "\nComputing feature...." );
+		final DoubleArrayFeature< Spot > feature = computer.compute( model );
+		System.out.println( "Done." );
+
+		final Iterator< Spot > iterator = model.getGraph().vertices().iterator();
+		while ( iterator.hasNext() )
 		{
 			final Spot spot = iterator.next();
-			final double[] values = feature.get(spot);
-			System.out.println(String.format("Spot %10s, median = %-10.1f", spot.getLabel(), values[0]));
+			final double[] values = feature.get( spot );
+			System.out.println( String.format( "Spot %10s, median = %-10.1f", spot.getLabel(), values[ 0 ] ) );
 			break;
 		}
 	}
