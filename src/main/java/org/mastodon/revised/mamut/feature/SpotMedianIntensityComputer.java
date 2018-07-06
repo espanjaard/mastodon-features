@@ -28,7 +28,6 @@ import org.mastodon.io.properties.DoublePropertyMapSerializer;
 import org.mastodon.pool.PoolCollectionWrapper;
 import org.mastodon.properties.DoublePropertyMap;
 import org.mastodon.revised.bdv.SharedBigDataViewerData;
-import org.mastodon.revised.bdv.overlay.util.JamaEigenvalueDecomposition;
 import org.mastodon.revised.model.feature.DoubleArrayFeature;
 import org.mastodon.revised.model.feature.FeatureUtil;
 import org.mastodon.revised.model.feature.FeatureUtil.Dimension;
@@ -41,11 +40,15 @@ import org.scijava.plugin.Plugin;
 import bdv.util.Affine3DHelpers;
 import bdv.viewer.Source;
 import bdv.viewer.SourceAndConverter;
-import net.imglib2.RandomAccess;
+import net.imglib2.Cursor;
+import net.imglib2.FinalInterval;
 import net.imglib2.RandomAccessibleInterval;
 import net.imglib2.RealPoint;
 import net.imglib2.realtransform.AffineTransform3D;
 import net.imglib2.type.numeric.RealType;
+import net.imglib2.util.Intervals;
+import net.imglib2.view.IntervalView;
+import net.imglib2.view.Views;
 
 @Plugin( type = SpotFeatureComputer.class, name = "Spot median intensity" )
 public class SpotMedianIntensityComputer extends SpotFeatureComputer
@@ -53,14 +56,9 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 
 	public static final String KEY = "Spot median intensity";
 
-	/** Convert from min radius to sigma by dividing radius by: */
-	private static final double SIGMA_FACTOR = 2.;
-
 	private static final String HELP_STRING =
 			"Computes the median intensity inside spots "
-					+ "over all sources of the dataset. "
-					+ "For now the median is calculated from the smallest "
-					+ " bounding box that fits within the spot.";
+					+ "over all sources of the dataset.";
 
 	public SpotMedianIntensityComputer()
 	{
@@ -91,15 +89,11 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 		if ( null == bdvData )
 			return Collections.emptyList();
 
-		// ES; change name projection keys from Mean to Median, comment Std, as not used
-		// for median
 		final List< String > projectionKeys = new ArrayList<>( processSource.length * 2 );
 		for ( int iSource = 0; iSource < processSource.length; iSource++ )
 		{
 			final String nameMedian = "Median ch " + iSource;
-			projectionKeys.add(nameMedian);
-			// final String nameStd = "Std ch " + iSource;
-			// projectionKeys.add( nameStd );
+			projectionKeys.add( nameMedian );
 		}
 		return projectionKeys;
 	}
@@ -112,16 +106,10 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 
 		// Calculation are made on resolution level 0.
 		final int level = 0;
-		// Covariance holder.
-		final double[][] cov = new double[ 3 ][ 3 ];
 		// Affine transform holder.
 		final AffineTransform3D transform = new AffineTransform3D();
 		// Physical calibration holder.
-		final double[] calibration = new double[ 3 ];
-		// Half-kernel holder.
-		final double[][] kernels = new double[ 3 ][];
-		// Half-kernel size holder.
-		final int[] halfkernelsizes = new int[ 3 ];
+		final double[] scales = new double[ 3 ];
 		// Spot center position holder in image coords.
 		final double[] pos = new double[ 3 ];
 		// Spot center holder in image coords.
@@ -135,170 +123,90 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 		for ( final boolean pSource : processSource )
 			if ( pSource )
 				nSourcesToProcess++;
-		final List< DoublePropertyMap< Spot > > pms = new ArrayList<>( nSourcesToProcess * 2 );
-		final List< String > names = new ArrayList<>( nSourcesToProcess * 2 );
-		final List< String > units = new ArrayList<>( nSourcesToProcess * 2 );
+		final List< DoublePropertyMap< Spot > > pms = new ArrayList<>( nSourcesToProcess );
+		final List< String > names = new ArrayList<>( nSourcesToProcess );
+		final List< String > units = new ArrayList<>( nSourcesToProcess );
 
 		final SpatioTemporalIndex< Spot > index = model.getSpatioTemporalIndex();
 		final int numTimepoints = bdvData.getNumTimepoints();
 		final int nSources = sources.size();
 
-		// ES initiate the statistics array for the median calculation and clear for
-		// each loop
+		// Initiate the statistics array for the median calculation and clear
+		// for
+		// each loop.
 		final DescriptiveStatistics intensities = new DescriptiveStatistics();
+		final EllipsoidInsideTest insideTest = new EllipsoidInsideTest();
+		// Stores the cursor location but in global coordinates.
+		final double[] globalPos = new double[ 3 ];
+		final RealPoint globalRP = RealPoint.wrap( globalPos );
 
 		for ( int iSource = 0; iSource < nSources; iSource++ )
 		{
 			if ( !processSource[ iSource ] )
 				continue;
-			// ES Change Mean to Median and comment standard dev, will not be used for
-			// median..
+
 			final PoolCollectionWrapper< Spot > vertices = model.getGraph().vertices();
-			final DoublePropertyMap<Spot> pmMedian = new DoublePropertyMap<>(vertices, Double.NaN);
-			pms.add(pmMedian);
+			final DoublePropertyMap< Spot > pmMedian = new DoublePropertyMap<>( vertices, Double.NaN );
+			pms.add( pmMedian );
 			final String nameMedian = "Median ch " + iSource;
-			names.add(nameMedian);
+			names.add( nameMedian );
 			units.add( FeatureUtil.dimensionToUnits( Dimension.INTENSITY, spaceUnits, timeUnits ) );
-			// final DoublePropertyMap< Spot > pmStd = new DoublePropertyMap<>( vertices,
-			// Double.NaN );
-			// pms.add( pmStd );
-			// final String nameStd = "Std ch " + iSource;
-			// names.add( nameStd );
-			// units.add( FeatureUtil.dimensionToUnits( Dimension.INTENSITY, spaceUnits,
-			// timeUnits ) );
 
 			final Source< ? > source = sources.get( iSource ).getSpimSource();
 			for ( int timepoint = 0; timepoint < numTimepoints; timepoint++ )
 			{
 				final SpatialIndex< Spot > spatialIndex = index.getSpatialIndex( timepoint );
 				source.getSourceTransform( timepoint, level, transform );
-				for ( int d = 0; d < calibration.length; d++ )
-					calibration[ d ] = Affine3DHelpers.extractScale( transform, d );
+				for ( int d = 0; d < scales.length; d++ )
+					scales[ d ] = Affine3DHelpers.extractScale( transform, d );
 
 				@SuppressWarnings( "unchecked" )
 				final RandomAccessibleInterval< RealType< ? > > rai = ( RandomAccessibleInterval< RealType< ? > > ) source.getSource( timepoint, level );
-				final RandomAccess< RealType< ? > > ra = rai.randomAccess( rai );
 
 				for ( final Spot spot : spatialIndex )
 				{
 					// Spot location in pixel units.
 					transform.applyInverse( center, spot );
+
+					// Compute (pessimistic) bounding box.
+					final double rmax = Math.sqrt( spot.getBoundingSphereRadiusSquared() );
+					final long[] min = new long[ rai.numDimensions() ];
+					final long[] max = new long[ rai.numDimensions() ];
 					for ( int d = 0; d < pos.length; d++ )
+					{
 						p[ d ] = Math.round( pos[ d ] );
-
-					// Compute kernels.
-					final double minRadius = minRadius( spot, cov );
-					final double sigma = minRadius / SIGMA_FACTOR; // um
-					for ( int d = 0; d < 3; d++ )
-					{
-						final double s = sigma / calibration[ d ];
-						halfkernelsizes[ d ] = Math.max( 2, ( int ) ( SIGMA_FACTOR * s + 0.5 ) + 1 );
-						kernels[ d ] = halfkernel( s, pos[ d ] - p[ d ], halfkernelsizes[ d ] );
+						final int r = ( int ) Math.ceil( rmax / scales[ d ] );
+						min[ d ] = p[ d ] - r;
+						max[ d ] = p[ d ] + r;
 					}
+					final FinalInterval interval = new FinalInterval( min, max );
+					final FinalInterval bb = Intervals.intersect( interval, rai );
 
-					// Unsubtle loops.
-					final long minX = Math.max( rai.min( 0 ), p[ 0 ] - halfkernelsizes[ 0 ] + 1 );
-					final long maxX = Math.min( rai.max( 0 ), p[ 0 ] + halfkernelsizes[ 0 ] - 1 );
-					final long minY = Math.max( rai.min( 1 ), p[ 1 ] - halfkernelsizes[ 1 ] + 1 );
-					final long maxY = Math.min( rai.max( 1 ), p[ 1 ] + halfkernelsizes[ 1 ] - 1 );
-					final long minZ = Math.max( rai.min( 2 ), p[ 2 ] - halfkernelsizes[ 2 ] + 1 );
-					final long maxZ = Math.min( rai.max( 2 ), p[ 2 ] + halfkernelsizes[ 2 ] - 1 );
-
-					/*
-					 * Compute running mean & std.
-					 * https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_incremental_algorithm
-					 */
-					double weightedMean = 0.;
-					double weightedSum = 0.;
-					double S = 0.;
-					
-					
-					/*
-					 * ES 04-07-2018 Determine median in the spot (for now Bounding Box around the
-					 * spot) First, make sure no data is left in the array where intensities are
-					 * stored
-					 */
+					// Iterate through the bounding-box, and skip when we are
+					// not in the ellipsoid.
 					intensities.clear();
-					
-					
-					for ( long z = minZ; z <= maxZ; z++ )
+					final IntervalView< RealType< ? > > view = Views.interval( rai, bb );
+					final Cursor< RealType< ? > > cursor = view.localizingCursor();
+					while ( cursor.hasNext() )
 					{
-						ra.setPosition( z, 2 );
-						final int iz = ( int ) ( z - minZ );
-						final double wz = kernels[ 2 ][ iz ];
-						for ( long y = minY; y <= maxY; y++ )
-						{
-							ra.setPosition( y, 1 );
-							final int iy = ( int ) ( y - minY );
-							final double wy = kernels[ 1 ][ iy ];
-							for ( long x = minX; x <= maxX; x++ )
-							{
-								ra.setPosition( x, 0 );
-								final int ix = ( int ) ( x - minX );
-								final double wx = kernels[ 0 ][ ix ];
-								final double val = ra.get().getRealDouble();
-								final double weight = wx * wy * wz;
+						cursor.fwd();
+						// Transform coordinates from local to global.
+						transform.apply( cursor, globalRP );
 
-								weightedSum += weight;
-								final double oldWeightedMean = weightedMean;
-								weightedMean = oldWeightedMean + ( weight / weightedSum ) * ( val - oldWeightedMean );
-								S = S + weight * ( val - oldWeightedMean ) * ( val - weightedMean );
-								
-								// ES: Add intensity value to the intensity list
-								intensities.addValue(val);
-								  
-								 
-							}
-						}
+						// Test if we are inside the ellipsoid.
+						if ( !insideTest.isPointInside( globalPos, spot ) )
+							continue;
+
+						intensities.addValue( cursor.get().getRealDouble() );
 					}
-					// ES get the median (or the percentile of 50):
-					final double median = intensities.getPercentile(50);
 
-					// final double variance = S / weightedSum;
-					pmMedian.set(spot, median);
-					// pmStd.set( spot, Math.sqrt( variance ) );
-					
-
+					// Get the median (or the percentile of 50):
+					final double median = intensities.getPercentile( 50 );
+					pmMedian.set( spot, median );
 				}
 			}
 		}
 		return new DoubleArrayFeature<>( KEY, Spot.class, pms, names, units );
-	}
-
-	private static final double[] halfkernel( final double sigma, final double offset, final int size )
-	{
-		final double two_sq_sigma = 2 * sigma * sigma;
-		final double[] kernel = new double[ 2 * size - 1 ];
-
-		for ( int i = 0; i < kernel.length; ++i )
-		{
-			final double x = i - size + 1 - offset;
-			kernel[ i ] = Math.exp( -( x * x ) / two_sq_sigma );
-		}
-
-		double sum = 0.;
-		for ( int i = 0; i < kernel.length; i++ )
-			sum += kernel[ i ];
-
-		for ( int i = 0; i < kernel.length; ++i )
-			kernel[ i ] /= sum;
-
-		return kernel;
-	}
-
-	private static final JamaEigenvalueDecomposition eig = new JamaEigenvalueDecomposition( 3 );
-
-	private static final double minRadius( final Spot spot, final double[][] cov )
-	{
-		// Best radius is smallest radius of ellipse.
-		spot.getCovariance( cov );
-		eig.decomposeSymmetric( cov );
-		final double[] eigVals = eig.getRealEigenvalues();
-		double minEig = Double.POSITIVE_INFINITY;
-		for ( int k = 0; k < eigVals.length; k++ )
-			minEig = Math.min( minEig, eigVals[ k ] );
-		final double radius = Math.sqrt( minEig );
-		return radius;
 	}
 
 	@Override
@@ -365,7 +273,7 @@ public class SpotMedianIntensityComputer extends SpotFeatureComputer
 		configPanel.add( lbl, c );
 		c.gridy++;
 
-		configPanel.add( new JSeparator(), c);
+		configPanel.add( new JSeparator(), c );
 		c.gridy++;
 
 		for ( int i = 0; i < nSources; i++ )
